@@ -13,8 +13,8 @@ except ImportError:
 def main():
     parser = OptionParser(
         usage="python %prog <in.gtf> <out.tab>",
-        description="5.10 update:\n"
-                    "Add sort.\n"
+        description="5.10 update: Add sort.\n"
+                    "5.12 update: debug"
                     "time test(hg38):\n"
                     "real    0m52.793s\n"
                     "user    0m52.170s\n"
