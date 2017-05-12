@@ -14,7 +14,8 @@ def main():
     parser = OptionParser(
         usage="python %prog <in.gtf> <out.tab>",
         description="5.10 update: Add sort.\n"
-                    "5.12 update: debug"
+                    "5.12 bug corrected: 1. No interval between exon1 and exon2. \n"
+                    "2. Two genes with same gene_id but different transcript_id merge. \n"
                     "time test(hg38):\n"
                     "real    0m52.793s\n"
                     "user    0m52.170s\n"
@@ -29,25 +30,16 @@ def main():
     prepare_annotation(gtf_file, out_file)
 
 def prepare_annotation(gtf_file, out_file):
+    aggregate_exons = collections.defaultdict(list)
+    exons = HTSeq.GenomicArrayOfSets("auto", stranded=True)  # For detecting overlap
     # Load exons from GTF
-    exons = HTSeq.GenomicArrayOfSets("auto", stranded=True)
     for feature in HTSeq.GFF_Reader(gtf_file, end_included=True):
     # for feature in itertools.islice(HTSeq.GFF_Reader(gtf_file, end_included=True), 500):
-        if feature.type == "exon":
-            exons[feature.iv] += (feature.attr['gene_id'], feature.attr['transcript_id'])
-
-    # Aggregate all exons to each gene/transcript
-    aggregate_exons = collections.defaultdict(list)
-    for iv, s in exons.steps():
-        if len(s) == 0:
+        if feature.type != "exon" or '_' in feature.iv.chrom:  # Filter chrom with '_'(i.e chr*alt)
             continue
-        gene_id = list(s)[0][0]
-        f = HTSeq.GenomicFeature(gene_id, "exon", iv)
-        f.source = os.path.basename(sys.argv[0])
-        f.attr = {}
-        f.attr['gene_id'] = gene_id
-        f.attr['transcript_id'] = list(s)[0][1]
-        aggregate_exons[gene_id].append(f)
+        aggregate_exons[feature.attr['gene_id']].append(feature)
+        exons[feature.iv] += "overlap with exon"
+
     # For each gene/transcript, number the exons
     for l in aggregate_exons.values():
         for i in range(len(l)):
@@ -59,6 +51,7 @@ def prepare_annotation(gtf_file, out_file):
         if len(gene) == 1:
             sys.stderr.write('%s has no intron. \n' % gene[0].name)
             continue
+        j = 0
         for i in range(1, len(gene)):
             if gene[i-1].iv.chrom != gene[i].iv.chrom:
                 continue
@@ -68,14 +61,22 @@ def prepare_annotation(gtf_file, out_file):
                 continue
             if gene[i-1].name != gene[i].name:
                 continue
-            ssList.append((gene[i-1], gene[i], i))
+            if gene[i-1].attr['transcript_id'] != gene[i].attr['transcript_id']:
+                continue
+            j += 1
+            ssList.append((gene[i-1], gene[i], j))
 
     # Sort and write out
     fout = open(out_file, "w")
     ssList.sort(key=lambda (g1, g2, i): (g1.iv.chrom, g1.iv.start))
     n = 1
     for gene1, gene2, i in ssList:
-        label = ':'.join(['EIE%06d' % n, gene1.name, '%d' % i])
+        fs = set()
+        intron_iv = HTSeq.GenomicInterval(gene1.iv.chrom, gene1.iv.end, gene2.iv.start, gene1.iv.strand)
+        for iv, s in exons[intron_iv].steps():
+            fs |= s
+        is_overlap = "overlap with exon" in fs
+        label = ':'.join(['EIE%06d' % n, gene1.name, '%d' % i, str(is_overlap)])
         interval = gene1.iv.chrom + '_' + gene1.iv.strand + '_' +\
                    str(gene1.iv.start) + ':' + str(gene1.iv.end) + '_' + \
                    str(gene2.iv.start) + ':' + str(gene2.iv.end)
@@ -84,5 +85,5 @@ def prepare_annotation(gtf_file, out_file):
     fout.close()
 
 if __name__ == '__main__':
-    # main()
-    prepare_annotation('hg38_ucsc.annotated.gtf', '666.gtf')
+    main()
+    # prepare_annotation('hg38_ucsc.annotated.gtf', '666.tab')
