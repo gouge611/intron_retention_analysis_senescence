@@ -13,7 +13,7 @@ except ImportError:
 
 def main():
     parser = OptionParser(
-        usage="python %prog [options] <EIE_junction.tab> <sorted.bam> <output>",
+        usage="python %prog [options] <EIE_junction.tab> <sorted.bam>",
         description="5.10 Basic model has finished."
                     "Note: sorted bam file is needed for input.",
 #                    "\n待更：alignment异常处理、pair-end",
@@ -57,7 +57,10 @@ def main():
     # f = open(out_file, 'w')
     for fn in sorted(dict_PIR.keys()):
         # f.write('%s\t%d\n' % (fn, dict_PIR[fn]))
-        sys.stdout.write('%s\t%d\n' % (fn, dict_PIR[fn]))
+        if type(dict_PIR[fn]) == str:
+            sys.stdout.write('%s\t%s\n' % (fn, dict_PIR[fn]))
+        elif type(dict_PIR[fn]) == float:
+            sys.stdout.write('%s\t%.2f\n' % (fn, dict_PIR[fn]))
     # f.close()
 
 def reverse_strand(s):
@@ -82,7 +85,8 @@ def esti_each_PIR(junctionELE, bam_reader, minaqual, stranded_boolean):  # 参�
 
     pir_dict = {}
     for label, coordinates in junctionELE:
-        # ele_id, gene_id, num_junction = label.strip().split(':')
+        ele_id, gene_id, num_junction, is_overlap = label.strip().split(':')
+        is_overlap = is_overlap == str(True)
         chrom, strand, e1start, e1end, e2start, e2end = re.split('_|:',coordinates.strip())
         e1start, e1end, e2start, e2end = map(int, (e1start, e1end, e2start, e2end))
 
@@ -110,32 +114,33 @@ def esti_each_PIR(junctionELE, bam_reader, minaqual, stranded_boolean):  # 参�
             features_aligned = set()
             for iv, val in features[a.iv].steps():
                 features_aligned |= val
-            if features_aligned == set(["exon1"]) and "N" not in [cigop for cigop in a.cigar]:
+            char_cigar = [cigop.type for cigop in a.cigar]
+            if features_aligned == set(["exon1"]) and "N" not in char_cigar:
                 counts_E1 += 1; continue
-            if features_aligned == set(["exon2"]) and "N" not in [cigop for cigop in a.cigar]:
+            if features_aligned == set(["exon2"]) and "N" not in char_cigar:
                 counts_E2 += 1; continue
-            if features_aligned == set(["intron"]) and "N" not in [cigop for cigop in a.cigar]:
+            if features_aligned == set(["intron"]) and "N" not in char_cigar:
                 counts_I += 1; continue
-            if features_aligned == set(["exon1", "intron"]) and "N" not in [cigop for cigop in a.cigar]:
+            if features_aligned == set(["exon1", "intron"]) and "N" not in char_cigar:
                 counts_E1I += 1; continue
-            if features_aligned == set(["intron", "exon2"]) and "N" not in [cigop for cigop in a.cigar]:
+            if features_aligned == set(["intron", "exon2"]) and "N" not in char_cigar:
                 counts_IE2 += 1; continue
-            if features_aligned == set(["exon1", "exon2"]) and "N" in [cigop for cigop in a.cigar]:
+            if features_aligned == set(["exon1", "intron", "exon2"]) and "N" in char_cigar:
                 counts_E1E2 += 1; continue
 
         # calculate PIR and filter
-        try:
-            pir = 100 * numpy.mean([counts_E1I, counts_IE2]) / (counts_E1E2 + numpy.mean([counts_E1I, counts_IE2]))
-            if min(pir) <= 95 and \
-            numpy.median([counts_E1I, counts_IE2, counts_I]) + counts_E1E2 > 10 and \
-            stats.binom_test(x=min(counts_E1I, counts_IE2, counts_I),
-                             n=min(counts_E1I, counts_IE2, counts_I) + max(counts_E1I, counts_IE2, counts_I),
-                             p=1/3.5, alternative="less") >= 0.05:
-                pir_dict[label] = pir
-            else:
-                pir_dict[label] = 'Filtered'
-        except ZeroDivisionError:
-            pir_dict[label] = 'NA'
+        pir = 100 * numpy.mean([counts_E1I, counts_IE2]) / (counts_E1E2 + numpy.mean([counts_E1I, counts_IE2]))
+        if min(pir.item()) <= 95.0 and \
+        numpy.median([counts_E1I, counts_IE2, counts_I]) + counts_E1E2 > 10.0 and \
+        stats.binom_test(x=min(counts_E1I, counts_IE2, counts_I),
+                         n=min(counts_E1I, counts_IE2, counts_I) + max(counts_E1I, counts_IE2, counts_I),
+                         p=1/3.5, alternative="less") >= 0.05 and \
+        not is_overlap:
+            pir_dict[label] = pir.item()
+        else:
+            pir_dict[label] = 'Filtered'
+    for fn in counts.keys():
+        sys.stderr.write("%s\t%d\n" % (fn, counts[fn]))
     return pir_dict
 
 if __name__ =='__main__':
