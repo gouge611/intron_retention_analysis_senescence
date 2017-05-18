@@ -52,16 +52,9 @@ def main():
         junctionList.append((field[0], field[1]))
 
     bam_reader = HTSeq.BAM_Reader(bam_file)
-    dict_PIR = esti_each_PIR(junctionList, bam_reader, options.minaqual, stranded)
+    esti_each_PIR(junctionList, bam_reader, options.minaqual, stranded)
 
-    # f = open(out_file, 'w')
-    for fn in sorted(dict_PIR.keys()):
-        # f.write('%s\t%d\n' % (fn, dict_PIR[fn]))
-        if type(dict_PIR[fn]) == str:
-            sys.stdout.write('%s\t%s\n' % (fn, dict_PIR[fn]))
-        elif type(dict_PIR[fn]) == float:
-            sys.stdout.write('%s\t%.2f\n' % (fn, dict_PIR[fn]))
-    # f.close()
+
 
 def reverse_strand(s):
     if s == '+':
@@ -83,7 +76,6 @@ def esti_each_PIR(junctionELE, bam_reader, minaqual, stranded_boolean):  # ÂèÇÊï
     counts['_notaligned'] = 0
     counts['_ambiguous_readpair_position'] = 0
 
-    pir_dict = {}
     for label, coordinates in junctionELE:
         ele_id, gene_id, num_junction, is_overlap = label.strip().split(':')
         is_overlap = is_overlap == str(True)
@@ -98,6 +90,7 @@ def esti_each_PIR(junctionELE, bam_reader, minaqual, stranded_boolean):  # ÂèÇÊï
         intron_iv = HTSeq.GenomicInterval(chrom, e1end, e2start, strand)
         features[intron_iv] += "intron"
 
+        pir = {}
         counts_E1 = counts_E2 = counts_E1I = counts_IE2 = counts_I = counts_E1E2 = 0
         for a in bam_reader.fetch(region=chrom + ':' + str(e1start) + '-' + str(e2end)):
             if a.iv.end > e2end:  # Discard right flanking region
@@ -127,21 +120,32 @@ def esti_each_PIR(junctionELE, bam_reader, minaqual, stranded_boolean):  # ÂèÇÊï
                 counts_IE2 += 1; continue
             if features_aligned == set(["exon1", "intron", "exon2"]) and "N" in char_cigar:
                 counts_E1E2 += 1; continue
-
+        pir[label] = (counts_E1, counts_E1I, counts_I, counts_IE2, counts_E2, counts_E1E2)
         # calculate PIR and filter
+        # calc_PIR_filter(counts_E1E2, counts_E1I, counts_I, counts_IE2, is_overlap, label)
+
+    for fn in sorted(pir.keys()):
+        sys.stdout.write('%s\t%s\n' % (fn, '\t'.join(map(str, pir[fn]))))
+    for fn in counts.keys():
+        sys.stderr.write("%s\t%d\n" % (fn, counts[fn]))
+
+    def calc_PIR_filter(counts_E1E2, counts_E1I, counts_I, counts_IE2, is_overlap, label):
+        pir_dict = {}
         pir = 100 * numpy.mean([counts_E1I, counts_IE2]) / (counts_E1E2 + numpy.mean([counts_E1I, counts_IE2]))
-        if min(pir.item()) <= 95.0 and \
-        numpy.median([counts_E1I, counts_IE2, counts_I]) + counts_E1E2 > 10.0 and \
-        stats.binom_test(x=min(counts_E1I, counts_IE2, counts_I),
-                         n=min(counts_E1I, counts_IE2, counts_I) + max(counts_E1I, counts_IE2, counts_I),
-                         p=1/3.5, alternative="less") >= 0.05 and \
-        not is_overlap:
+        if min([pir.item()]) <= 95.0 and \
+                                numpy.median([counts_E1I, counts_IE2, counts_I]) + counts_E1E2 > 10.0 and \
+                        stats.binom_test(x=min(counts_E1I, counts_IE2, counts_I),
+                                         n=min(counts_E1I, counts_IE2, counts_I) + max(counts_E1I, counts_IE2, counts_I),
+                                         p=1 / 3.5, alternative="less") >= 0.05 and \
+                not is_overlap:
             pir_dict[label] = pir.item()
         else:
             pir_dict[label] = 'Filtered'
-    for fn in counts.keys():
-        sys.stderr.write("%s\t%d\n" % (fn, counts[fn]))
-    return pir_dict
+        for fn in sorted(pir_dict.keys()):
+            if type(pir_dict[fn]) == str:
+                sys.stdout.write('%s\t%s\n' % (fn, pir_dict[fn]))
+            elif type(pir_dict[fn]) == float:
+                sys.stdout.write('%s\t%.2f\n' % (fn, pir_dict[fn]))
 
 if __name__ =='__main__':
     # test()
