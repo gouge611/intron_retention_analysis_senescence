@@ -75,6 +75,7 @@ def esti_each_PIR(junctionELE, bam_reader, minaqual, stranded_boolean):  # ÂèÇÊï
     counts['_lowaqual'] = 0
     counts['_notaligned'] = 0
     counts['_ambiguous_readpair_position'] = 0
+    pir = {}
 
     for label, coordinates in junctionELE:
         ele_id, gene_id, num_junction, is_overlap = label.strip().split(':')
@@ -90,7 +91,6 @@ def esti_each_PIR(junctionELE, bam_reader, minaqual, stranded_boolean):  # ÂèÇÊï
         intron_iv = HTSeq.GenomicInterval(chrom, e1end, e2start, strand)
         features[intron_iv] += "intron"
 
-        pir = {}
         counts_E1 = counts_E2 = counts_E1I = counts_IE2 = counts_I = counts_E1E2 = 0
         for a in bam_reader.fetch(region=chrom + ':' + str(e1start) + '-' + str(e2end)):
             if a.iv.end > e2end:  # Discard right flanking region
@@ -121,16 +121,16 @@ def esti_each_PIR(junctionELE, bam_reader, minaqual, stranded_boolean):  # ÂèÇÊï
             if features_aligned == set(["exon1", "intron", "exon2"]) and "N" in char_cigar:
                 counts_E1E2 += 1; continue
         pir[label] = (counts_E1, counts_E1I, counts_I, counts_IE2, counts_E2, counts_E1E2)
-        # calculate PIR and filter
-        # calc_PIR_filter(counts_E1E2, counts_E1I, counts_I, counts_IE2, is_overlap, label)
+
+    # calculate PIR and filter
+    # calc_PIR_filter(counts_E1E2, counts_E1I, counts_I, counts_IE2, is_overlap, label, pir)
 
     for fn in sorted(pir.keys()):
         sys.stdout.write('%s\t%s\n' % (fn, '\t'.join(map(str, pir[fn]))))
     for fn in counts.keys():
         sys.stderr.write("%s\t%d\n" % (fn, counts[fn]))
 
-    def calc_PIR_filter(counts_E1E2, counts_E1I, counts_I, counts_IE2, is_overlap, label):
-        pir_dict = {}
+    def calc_PIR_filter(counts_E1E2, counts_E1I, counts_I, counts_IE2, is_overlap, label, pir_dict):
         pir = 100 * numpy.mean([counts_E1I, counts_IE2]) / (counts_E1E2 + numpy.mean([counts_E1I, counts_IE2]))
         if min([pir.item()]) <= 95.0 and \
                                 numpy.median([counts_E1I, counts_IE2, counts_I]) + counts_E1E2 > 10.0 and \
