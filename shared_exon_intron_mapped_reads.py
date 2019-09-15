@@ -3,105 +3,131 @@
 
 from __future__ import division, print_function
 from optparse import OptionParser
-import sys, collections, itertools, os.path, numpy, re
+import sys, collections, itertools, os.path, re
+
 try:
     import HTSeq
 except ImportError:
     sys.stderr.write("Could not import HTSeq.")
     sys.exit(1)
 
-
-def main():
-    parser = OptionParser(
-        usage="python %prog [options] <refGene.txt> <sorted.bam>",
-        description='BAM file should be indexed by SAMtools. ' +
-        'Update: 1. Add coverage calculation. \n' +
-        '2. Output style adjustment. \n' +
-        '3. The way reads allocate has changed. ',
-        epilog="Author: gouge\tUpdate: 13/Dec/2017"
-    )
-    parser.add_option("-a", "--minaqual", type="int", dest="minaqual",
-                      default=10,
-                      help="skip all reads with alignment quality lower than the given " +
-                             "minimum value (default: 10)")
-    parser.add_option("-s", "--stranded", type="choice", dest="stranded",
-                       choices=("yes", "no", "reverse"), default="no",
-                       help="'yes', 'no', or 'reverse'. Indicates whether the data is " +
-                              "from a strand-specific assay (default: no ). ")
-    (options, args) = parser.parse_args()
-
-    refGene_txt = args[0]
-    bam_file = args[1]
-    bam_reader = HTSeq.BAM_Reader(bam_file)
-    stranded = options.stranded == 'yes' or options.stranded == 'reverse'
-    reverse = options.stranded == 'reverse'
-
-    mapping_reads2shared_exons_introns(refGene_txt, bam_reader, options.minaqual, stranded)
-
-def mapping_reads2shared_exons_introns(refGene_txt, bam_reader, minaqual=10, stranded_boolean=False):
+def mapping_reads2shared_exons_introns(refGene_txt, bam_filename, minaqual, stranded, order, max_buffer_size):
     # initialise counters
     counts = {}
-    counts[ '_empty' ] = 0
-    counts[ '_ambiguous' ] = 0
-    counts[ '_lowaqual' ] = 0
-    counts[ '_notaligned' ] = 0
+    counts['_empty'] = 0
+    counts['_ambiguous'] = 0
+    counts['_lowaqual'] = 0
+    counts['_notaligned'] = 0
     counts['_ambiguous_readpair_position'] = 0
 
-    sys.stdout.write("Gene\tfeature\tposition\tlength\tread_counts\tread_counts_norm\tcoverage(%)\n")
+    # Read BAM file
+    bam_reader = HTSeq.BAM_Reader(bam_filename)
+    # CIGAR match characters (including alignment match, sequence match, and sequence mismatch
+    cigar_char = ('M', '=', 'X')
+    # (Refer to HTSeq-count)strand-associated
+    stranded_boolean = stranded == 'yes' or stranded == 'reverse'
+    reverse_boolean = stranded == 'reverse'
+    def invert_strand(iv):
+        iv2 = iv.copy()
+        if iv2.strand == "+":
+            iv2.strand = "-"
+        elif iv2.strand == "-":
+            iv2.strand = "+"
+        else:
+            raise ValueError("Illegal strand")
+        return iv2
 
+    sys.stdout.write("Gene\tfeature\trank\tposition\tlength\tread_counts\tread_counts_norm\tcoverage(%)\n")
+
+    annot = collections.OrderedDict()
     for line in open(refGene_txt):
-        gene_symbol, chrom, strand, shared_exon_start, shared_exon_end, \
-        shared_intron_start, shared_intron_end, \
-        sss, bbb = line.strip().split('\t')
-        shared_exon_length_list, shared_intron_lengh_list = ([], [])
+        gene_label, feature, rank, position, length = line.strip().split('\t')
+        chrom, iv_str, strand = position.strip().split(':')
+        start, end = map(int, iv_str.strip().split('-'))
+        annot.setdefault(gene_label, []).append((feature, int(rank), chrom, start, end, strand, int(length)))
+
+    for gene_name in annot:
         gene_count = {}
-        gas = HTSeq.GenomicArrayOfSets("auto", stranded = stranded_boolean)
-        ga = HTSeq.GenomicArray("auto", stranded = stranded_boolean, typecode = "i")
-        shared_exon_cvg_list, shared_intron_cvg_list = ([], [])
+        gas = HTSeq.GenomicArrayOfSets("auto", stranded=stranded_boolean)
+        ga = HTSeq.GenomicArray("auto", stranded=stranded_boolean, typecode="i")
+        cvg_list = []
 
         # Annotation
-        i = j = 1
-        assert len(shared_exon_start.strip().split(',')) == len(shared_exon_end.strip().split(','))
-        for s, e in zip(map(int, shared_exon_start.strip().split(',')), map(int, shared_exon_end.strip().split(','))):
-            if s >= e:
-                shared_exon_length_list.append("NA")
-                continue
-            iv = HTSeq.GenomicInterval(chrom, s, e, strand)
-            shared_exon_length_list.append(e-s)
-            gas[iv] += ('exon', i)
-            gene_count[('exon', i)] = 0
-            i += 1
-        assert len(shared_intron_start.strip().split(',')) == len(shared_intron_end.strip().split(','))
-        for s, e in zip(map(int, shared_intron_start.strip().split(',')), map(int, shared_intron_end.strip().split(','))):
-            if s >= e:
-                shared_intron_lengh_list.append("NA")
-                continue
-            iv = HTSeq.GenomicInterval(chrom, s, e, strand)
-            shared_intron_lengh_list.append(e-s)
-            gas[iv] += ('intron', j)
-            gene_count[('intron', j)] = 0  # not i. T_T
-            j += 1
+        for feature, rank, chrom, start, end, strand, length in annot[gene_name]:
+            iv = HTSeq.GenomicInterval(chrom, start, end, strand)
+            gas[iv] += (feature, rank)
+            gene_count[(feature, rank)] = 0
+
+        # 直接对bam_reader取iter有问题，作者说是pysam的bug导致的。修正：加fetch
+        boundary_left, boundary_right = min([i[3] for i in annot[gene_name]]), max([i[4] for i in annot[gene_name]])
+        region_fetch = annot[gene_name][0][2] + ':' + str(int(boundary_left) - 500) + '-' + str(int(boundary_right) + 500)
+        read_seq = bam_reader.fetch(region=region_fetch)
+
+        # distinguish SE and PE mode:
+        read_seq_iter = iter(bam_reader.fetch())
+        one_read = next(read_seq_iter)
+        pe_mode = one_read.paired_end
+
+        if pe_mode:
+            if order == 'name':
+                read_seq = HTSeq.pair_SAM_alignments(read_seq)
+            elif order == 'pos':
+                read_seq = HTSeq.pair_SAM_alignments_with_buffer(read_seq, max_buffer_size=max_buffer_size)
+            else:
+                raise ValueError("Illegal order name.")
 
         # Mapping
-        boundary_left, boundary_right = \
-            shared_exon_start.strip().split(',')[0], shared_exon_end.strip().split(',')[-1]
-        for a in bam_reader.fetch(region=chrom + ':' + str(int(boundary_left) + 500) + '-' + str(int(boundary_right) + 500)):
-            if not a.aligned:
-                counts['_notaligned'] += 1
-                continue
-            if a.optional_field('NH') > 1:
-                continue
-            if a.aQual < minaqual:
-                counts['_lowaqual'] += 1
-                continue
+        for a in read_seq:
+            if not pe_mode:
+                if not a.aligned:
+                    counts['_notaligned'] += 1
+                    continue
+                if a.optional_field('NH') > 1:
+                    continue
+                if a.aQual < minaqual:
+                    counts['_lowaqual'] += 1
+                    continue
+                if not reverse_boolean:
+                    iv_seq = (cigop.ref_iv for cigop in a.cigar
+                              if cigop.type == "M" and cigop.size > 0)
+                else:
+                    iv_seq = (invert_strand(cigop.ref_iv) for cigop in a.cigar
+                              if cigop.type in cigar_char and cigop.size > 0)
+            # pe mode
+            else:
+                if ((a[0] and a[0].aQual < minaqual) or
+                    (a[1] and a[1].aQual < minaqual)):
+                    counts['_lowaqual'] += 1
+                    continue
+                if ((a[0] and a[0].optional_field('NH') > 1) or
+                    (a[1] and a[1].optional_field('NH') > 1)):
+                    continue
+                if a[0] is not None and a[0].aligned:
+                    if not reverse_boolean:
+                        iv_seq = (cigop.ref_iv for cigop in a[0].cigar
+                                  if cigop.type in cigar_char and cigop.size > 0)
+                    else:
+                        iv_seq = (invert_strand(cigop.ref_iv) for cigop in a[0].cigar
+                                  if cigop.type in cigar_char and cigop.size > 0)
+                else:
+                    iv_seq = tuple()
+                if a[1] is not None and a[1].aligned:
+                    if not reverse_boolean:
+                        iv_seq = itertools.chain(
+                            iv_seq,
+                            (invert_strand(cigop.ref_iv) for cigop in a[1].cigar
+                             if cigop.type in cigar_char and cigop.size > 0))
+                    else:
+                        iv_seq = itertools.chain(
+                            iv_seq,
+                            (cigop.ref_iv for cigop in a[1].cigar
+                             if cigop.type in cigar_char and cigop.size > 0))
 
             feature_aligned = set()
-            for cigop in a.cigar:
-                if cigop.type != 'M':
-                    continue
-                for iv, val in gas[cigop.ref_iv].steps():
-                    feature_aligned |= val
-                    ga[iv] += 1 # for calculating coverage
+            for iv in iv_seq:
+                for iv2, val2 in gas[iv].steps():
+                    feature_aligned |= val2
+                    ga[iv] += 1  # for calculating coverage
             if len(feature_aligned) == 0:
                 counts['_empty'] += 1
                 continue
@@ -113,46 +139,66 @@ def mapping_reads2shared_exons_introns(refGene_txt, bam_reader, minaqual=10, str
                 for f in feature_aligned:
                     gene_count[f] += 1
 
-        # Coverage calculation
-        for s, e in zip(map(int, shared_exon_start.strip().split(',')), map(int, shared_exon_end.strip().split(','))):
-            if s >= e:
-                shared_exon_cvg_list.append("NA")
-                continue
-            iv = HTSeq.GenomicInterval(chrom, s, e, strand)
+        res = []
+        for feature, rank, chrom, start, end, strand, length in annot[gene_name]:
+            feature_count = gene_count[(feature, rank)]
+            feature_count_norm = feature_count / length * 1000
+            # Coverage calculation
+            iv = HTSeq.GenomicInterval(chrom, start, end, strand)
             cvg_region = list(ga[iv])
             cvg = len(filter(lambda x: x > 0, cvg_region)) / len(cvg_region) * 100
-            shared_exon_cvg_list.append(cvg)
-        for s, e in zip(map(int, shared_intron_start.strip().split(',')), map(int, shared_intron_end.strip().split(','))):
-            if s >= e:
-                shared_intron_cvg_list.append("NA")
-                continue
-            iv = HTSeq.GenomicInterval(chrom, s, e, strand)
-            cvg_region = list(ga[iv])
-            cvg = len(filter(lambda x: x > 0, cvg_region)) / len(cvg_region) * 100
-            shared_intron_cvg_list.append(cvg)
+            res.append([feature, rank, chrom, start, end, strand, length, feature_count, feature_count_norm, cvg])
 
         # Output
-        # sys.stdout.write(line.strip() + '\t')
-        exon_count = [gene_count[fn] for fn in sorted(gene_count.keys(), key=lambda x:x[1]) if fn[0] == 'exon']
-        exon_count_norm = [c/l*1000 for c, l in zip(exon_count, shared_exon_length_list)]
-        intron_count = [gene_count[fn] for fn in sorted(gene_count.keys(), key=lambda x:x[1]) if fn[0] == 'intron']
-        intron_count_norm = [c/l*1000 for c, l in zip(intron_count, shared_intron_lengh_list)]
-        # sys.stdout.write(str(sum(intron_count)) + '\t' + ','.join(map(str, intron_count)) + '\t' + ','.join(map(str, intron_count_norm)) + '\t')
-        # sys.stdout.write(str(sum(exon_count)) + '\t' + ','.join(map(str, exon_count)) + '\t' + ','.join(map(str, exon_count_norm)) + '\t')
-        # sys.stdout.write(','.join(map(str, shared_intron_cvg_list)) + '\t' + ','.join(map(str, shared_exon_cvg_list)) + '\n')
-
-        for start, end, count, count_norm, cvg in zip(map(int, shared_exon_start.strip().split(',')), map(int, shared_exon_end.strip().split(',')), exon_count, exon_count_norm, shared_exon_cvg_list):
+        for feature, rank, chrom, start, end, strand, length, feature_count, feature_count_norm, cvg in res:
             pos = "%s:%d-%d:%s" % (chrom, start, end, strand)
-            length = end - start
-            sys.stdout.write('\t'.join(map(str, [gene_symbol, "shared_exon", pos, length, count, count_norm, cvg])) + '\n')
-        for start, end, count, count_norm, cvg in zip(map(int, shared_intron_start.strip().split(',')), map(int, shared_intron_end.strip().split(',')), intron_count, intron_count_norm, shared_intron_cvg_list):
-            pos = "%s:%d-%d:%s" % (chrom, start, end, strand)
-            length = end - start
-            sys.stdout.write('\t'.join(map(str, [gene_symbol, "shared_intron", pos, length, count, count_norm, cvg])) + '\n')
+            sys.stdout.write('\t'.join(
+                map(str, [gene_name, feature, rank, pos, length, feature_count, feature_count_norm, cvg])) + '\n')
 
     for fn in counts.keys():
         sys.stderr.write('%s\t%d\n' % (fn, counts[fn]))
 
+def main():
+    parser = OptionParser(
+        usage="python %prog [options] <refGene.txt> <sorted.bam>",
+        description='BAM file should be indexed by SAMtools. ' +
+                    'Update: 1. Add coverage calculation. \n' +
+                    '2. Output style adjustment. \n' +
+                    '3. The way reads allocate has changed. ' +
+                    'new(3.28): add paired-end mode. ',
+        epilog="Author: gouge\tUpdate: 18.3.28"
+    )
+    parser.add_option("-a", "--minaqual", type="int", dest="minaqual",
+                      default=10,
+                      help="skip all reads with alignment quality lower than the given " +
+                           "minimum value (default: 10)")
+    parser.add_option("-s", "--stranded", type="choice", dest="stranded",
+                      choices=("yes", "no", "reverse"), default="no",
+                      help="'yes', 'no', or 'reverse'. Indicates whether the data is " +
+                           "from a strand-specific assay (default: no ). ")
+    parser.add_option("-r", "--order", dest="order",
+                      choices=("pos", "name"), default="pos",
+                      help="'pos' or 'name'. Sorting order of <sorted.bam> (default: pos). Paired-end sequencing " +
+                            "data must be sorted either by position or by read name, and the sorting order " +
+                            "must be specified. Ignored for single-end data.")
+    parser.add_option("--max-reads-in-buffer", dest="max_buffer_size", type=int, default=30000000,
+                      help="When <sorted.bam> is paired end sorted by position, " +
+                            "allow only so many reads to stay in memory until the mates are " +
+                            "found (raising this number will use more memory). Has no effect " +
+                            "for single end or paired end sorted by name")
+    (options, args) = parser.parse_args()
+
+    refGene_txt = args[0]
+    bam_file = args[1]
+
+    mapping_reads2shared_exons_introns(refGene_txt,
+                                       bam_file,
+                                       options.minaqual,
+                                       options.stranded,
+                                       options.order,
+                                       options.max_buffer_size)
+
+
 if __name__ == '__main__':
     main()
-    # mapping_reads2shared_exons_introns("refGene_hg19.txt_length_filter_final", HTSeq.BAM_Reader("test.bam"))
+    # mapping_reads2shared_exons_introns("annot.txt", "", 10, False)
