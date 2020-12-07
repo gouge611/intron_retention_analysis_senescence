@@ -1,7 +1,7 @@
 # Intron Retention Analysis of RNA-seq data during cellular senescence
 
 This repository contains in-house scripts that are used for intron retention analysis in the paper
-- "Prevalent intron retention fine-tunes gene expression and contributes to cellular senescence" by Jun Yao, Dong Ding, Xueping Li, Ting Shen, Haihui Fu, Hua Zhong, Gang Wei, Ting Ni. 
+- Yao J, Ding D, Li X, Shen T, Fu H, Zhong H, Wei G, Ni T. **Prevalent intron retention fine-tunes gene expression and contributes to cellular senescence.** Aging Cell. 2020 Dec 4:e13276. doi: 10.1111/acel.13276. Epub ahead of print. PMID: 33274830.
 
 ## Description of files
 
